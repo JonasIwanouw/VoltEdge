@@ -1,0 +1,8 @@
+# Testdata - må ikke pushes til GitHub
+seed.sql
+
+# Environment variables med passwords
+.env
+
+# VSCode settings
+.vscode/
