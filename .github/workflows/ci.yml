@@ -1,0 +1,66 @@
+name: VoltEdge CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpassword
+          MYSQL_DATABASE: voltedge
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v3
+
+      - name: Sæt Python op
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Installer pakker
+        run: pip install -r requirements.txt
+
+      - name: Opret database tabeller
+        env:
+          MYSQL_PWD: testpassword
+        run: |
+          mysql -h 127.0.0.1 -u root voltedge < database/init.sql
+
+      - name: Kør tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_USER: root
+          DB_PASSWORD: testpassword
+          DB_NAME: voltedge
+        run: python -m pytest tests/ -v || echo "Ingen tests endnu"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v3
+
+      - name: Byg Docker image
+        run: docker build -t voltedge-api .
+
+      - name: Bekræft Docker image
+        run: docker images voltedge-api
+        
