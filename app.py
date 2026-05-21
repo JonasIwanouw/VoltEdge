@@ -21,18 +21,13 @@ def get_connection():
 
 # ---------- THRESHOLDS ----------
 
-TEMP_THRESHOLD = 80.0      # grader celsius
-VOLTAGE_MIN = 200.0        # volt — under dette = ingen strøm fra nettet
-CURRENT_MIN = 0.1          # ampere — under dette = ingen strøm trækkes
+TEMP_THRESHOLD = 80.0
+VOLTAGE_MIN = 200.0
+CURRENT_MIN = 0.1
 
 # ---------- ENERGINET GRID CHECK ----------
 
 def check_grid_status(area="DK1"):
-    """
-    Kalder Energinet API og tjekker om el-nettet er stabilt.
-    area = DK1 (Jylland/Fyn) eller DK2 (Sjælland)
-    Returnerer: GRID_OK, GRID_STRESS eller GRID_UNKNOWN
-    """
     try:
         url = "https://electricitymarketservice.energinet.dk/api/v1/PublicData/dataset/mfrrrequest/latest"
         response = requests.get(url, timeout=5)
@@ -90,58 +85,40 @@ def get_charger(charger_id):
 @app.route("/api/telemetry", methods=["POST"])
 def receive_telemetry():
     data = request.get_json()
-
-    # Tjek at alle nødvendige felter er med
     required_fields = ["id", "charger_id", "power_kw", "voltage", "current_a", "temperature"]
     if not data or any(f not in data for f in required_fields):
         return jsonify({"error": f"Missing one of {required_fields}"}), 400
 
-    # Hent alle målinger fra requesten
     power_kw    = data["power_kw"]
     voltage     = data["voltage"]
     current_a   = data["current_a"]
     temperature = data["temperature"]
     error_code  = data.get("error_code", None)
     grid_status = None
-
-    # ---------- INCIDENT DETECTION LOGIK ----------
-
     detected_incident = None
     severity = None
 
     if temperature > TEMP_THRESHOLD:
-        # Temperatur over 80 grader — kritisk fejl
         detected_incident = "OVER_TEMPERATURE"
         severity = "Critical"
         error_code = "OVER_TEMPERATURE"
-
     elif voltage < VOLTAGE_MIN:
-        # Spænding under 200V — tjek om det er el-nettets fejl
         grid_status = check_grid_status("DK1")
-
         if grid_status == "GRID_STRESS":
-            # El-nettet er under stress — ikke VoltEdges ansvar
             detected_incident = "GRID_OUTAGE"
             severity = "High"
             error_code = "GRID_OUTAGE"
         else:
-            # El-nettet er OK — fejlen er hos ladestanderen
             detected_incident = "NO_POWER"
             severity = "High"
             error_code = "NO_POWER"
-
     elif current_a < CURRENT_MIN and voltage >= VOLTAGE_MIN:
-        # Spænding er normal men ingen strøm trækkes — ledningsskade
         detected_incident = "CABLE_DEFECT"
         severity = "Medium"
         error_code = "CABLE_DEFECT"
-
     elif error_code is not None:
-        # OCPP har selv rapporteret en fejlkode
         detected_incident = "CONNECTOR_FAULT"
         severity = "Medium"
-
-    # ---------- GEM TELEMETRI I DATABASEN ----------
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -153,10 +130,6 @@ def receive_telemetry():
     )
     conn.commit()
 
-    # ---------- OPRET AUTOMATISK INCIDENT ----------
-    # Opret kun incident hvis det IKKE er en grid-fejl
-    # Grid-fejl er ikke VoltEdges ansvar
-
     incident_id = None
     if detected_incident and detected_incident != "GRID_OUTAGE":
         incident_id = str(uuid.uuid4())
@@ -166,12 +139,29 @@ def receive_telemetry():
             VALUES (%s, %s, %s, %s, 'Open')""",
             (incident_id, data["charger_id"], detected_incident, severity)
         )
+
+        # Opret automatisk alert notification
+        notification_id = str(uuid.uuid4())
+        cursor.execute(
+            """INSERT INTO alert_notification
+            (id, incident_id, channel, recipient, delivery_status)
+            VALUES (%s, %s, %s, %s, %s)""",
+            (notification_id, incident_id, "email", "tekniker@voltedge.dk", "Pending")
+        )
+
+        # Opret automatisk technician assignment
+        assignment_id = str(uuid.uuid4())
+        cursor.execute(
+            """INSERT INTO technician_assignment
+            (id, incident_id, technician_id, confirmed)
+            VALUES (%s, %s, %s, %s)""",
+            (assignment_id, incident_id, "tech-001", False)
+        )
+
         conn.commit()
 
     cursor.close()
     conn.close()
-
-    # ---------- RETURNER SVAR ----------
 
     return jsonify({
         "status": "ALARM" if detected_incident else "OK",
@@ -242,6 +232,53 @@ def get_assignments():
     conn.close()
     return jsonify(rows)
 
+# ---------- TECHNICIAN RESPOND ----------
+
+@app.route("/api/assignments/<string:assignment_id>/respond", methods=["PUT"])
+def respond_assignment(assignment_id):
+    """
+    Tekniker svarer ja eller nej til en opgave
+    Send: { "accept": true } eller { "accept": false }
+    """
+    data = request.get_json()
+    if not data or "accept" not in data:
+        return jsonify({"error": "Missing 'accept' field"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, incident_id FROM technician_assignment WHERE id = %s", (assignment_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Assignment not found"}), 404
+
+    incident_id = row[1]
+
+    if data["accept"]:
+        # Tekniker accepterer — opdater assignment og incident
+        cursor.execute(
+            "UPDATE technician_assignment SET confirmed = TRUE WHERE id = %s",
+            (assignment_id,)
+        )
+        cursor.execute(
+            "UPDATE incident SET status = 'Assigned' WHERE id = %s",
+            (incident_id,)
+        )
+        message = "Opgave accepteret — incident er nu Assigned"
+    else:
+        # Tekniker afviser — incident forbliver Open
+        cursor.execute(
+            "UPDATE technician_assignment SET confirmed = FALSE WHERE id = %s",
+            (assignment_id,)
+        )
+        message = "Opgave afvist — incident forbliver Open"
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({"message": message, "assignment_id": assignment_id})
+
 # ---------- ALERT NOTIFICATIONS API ----------
 
 @app.route("/api/notifications", methods=["GET"])
@@ -263,10 +300,6 @@ def get_notifications():
 
 @app.route("/api/grid-status", methods=["GET"])
 def get_grid_status():
-    """
-    Tjekker el-nettets status direkte fra Energinet
-    Kan kaldes med ?area=DK1 eller ?area=DK2
-    """
     area = request.args.get("area", "DK1")
     status = check_grid_status(area)
     return jsonify({
@@ -277,6 +310,79 @@ def get_grid_status():
             "GRID_STRESS": "El-nettet er under stress — mulig årsag til NO_POWER incidents",
             "GRID_UNKNOWN": "Kunne ikke hente data fra Energinet"
         }.get(status)
+    })
+
+# ---------- AUTOMATISK SCANNING AF TELEMETRI ----------
+
+@app.route("/api/scan-telemetry", methods=["POST"])
+def scan_telemetry():
+    """
+    Scanner alle telemetri-rækker med fejl og opretter
+    automatisk incidents, notifications og assignments
+    """
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT t.* FROM telemetry_reading t
+        WHERE t.error_code IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM incident i 
+            WHERE i.charger_id = t.charger_id
+            AND i.incident_type = t.error_code
+            AND i.status = 'Open'
+        )
+    """)
+    readings = cursor.fetchall()
+
+    severity_map = {
+        "OVER_TEMPERATURE": "Critical",
+        "NO_POWER": "High",
+        "CABLE_DEFECT": "Medium",
+        "CONNECTOR_FAULT": "Medium"
+    }
+
+    incidents_created = 0
+
+    for reading in readings:
+        incident_id = str(uuid.uuid4())
+        severity = severity_map.get(reading["error_code"], "Low")
+
+        # Opret incident
+        cursor.execute(
+            """INSERT INTO incident 
+            (id, charger_id, incident_type, severity, status) 
+            VALUES (%s, %s, %s, %s, 'Open')""",
+            (incident_id, reading["charger_id"], reading["error_code"], severity)
+        )
+
+        # Opret alert notification
+        notification_id = str(uuid.uuid4())
+        cursor.execute(
+            """INSERT INTO alert_notification
+            (id, incident_id, channel, recipient, delivery_status)
+            VALUES (%s, %s, %s, %s, %s)""",
+            (notification_id, incident_id, "email", "tekniker@voltedge.dk", "Pending")
+        )
+
+        # Opret technician assignment
+        assignment_id = str(uuid.uuid4())
+        cursor.execute(
+            """INSERT INTO technician_assignment
+            (id, incident_id, technician_id, confirmed)
+            VALUES (%s, %s, %s, %s)""",
+            (assignment_id, incident_id, "tech-001", False)
+        )
+
+        incidents_created += 1
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return jsonify({
+        "message": "Scanning færdig",
+        "incidents_created": incidents_created
     })
 
 if __name__ == "__main__":
