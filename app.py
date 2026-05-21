@@ -4,6 +4,7 @@ import os
 import uuid
 import requests
 from dotenv import load_dotenv
+from root_cause_analysis import analyze_charger, get_mttr_stats, get_incident_stats
 
 load_dotenv()
 
@@ -139,8 +140,6 @@ def receive_telemetry():
             VALUES (%s, %s, %s, %s, 'Open')""",
             (incident_id, data["charger_id"], detected_incident, severity)
         )
-
-        # Opret automatisk alert notification
         notification_id = str(uuid.uuid4())
         cursor.execute(
             """INSERT INTO alert_notification
@@ -148,8 +147,6 @@ def receive_telemetry():
             VALUES (%s, %s, %s, %s, %s)""",
             (notification_id, incident_id, "email", "tekniker@voltedge.dk", "Pending")
         )
-
-        # Opret automatisk technician assignment
         assignment_id = str(uuid.uuid4())
         cursor.execute(
             """INSERT INTO technician_assignment
@@ -157,7 +154,6 @@ def receive_telemetry():
             VALUES (%s, %s, %s, %s)""",
             (assignment_id, incident_id, "tech-001", False)
         )
-
         conn.commit()
 
     cursor.close()
@@ -236,10 +232,6 @@ def get_assignments():
 
 @app.route("/api/assignments/<string:assignment_id>/respond", methods=["PUT"])
 def respond_assignment(assignment_id):
-    """
-    Tekniker svarer ja eller nej til en opgave
-    Send: { "accept": true } eller { "accept": false }
-    """
     data = request.get_json()
     if not data or "accept" not in data:
         return jsonify({"error": "Missing 'accept' field"}), 400
@@ -256,7 +248,6 @@ def respond_assignment(assignment_id):
     incident_id = row[1]
 
     if data["accept"]:
-        # Tekniker accepterer — opdater assignment og incident
         cursor.execute(
             "UPDATE technician_assignment SET confirmed = TRUE WHERE id = %s",
             (assignment_id,)
@@ -267,7 +258,6 @@ def respond_assignment(assignment_id):
         )
         message = "Opgave accepteret — incident er nu Assigned"
     else:
-        # Tekniker afviser — incident forbliver Open
         cursor.execute(
             "UPDATE technician_assignment SET confirmed = FALSE WHERE id = %s",
             (assignment_id,)
@@ -316,13 +306,8 @@ def get_grid_status():
 
 @app.route("/api/scan-telemetry", methods=["POST"])
 def scan_telemetry():
-    """
-    Scanner alle telemetri-rækker med fejl og opretter
-    automatisk incidents, notifications og assignments
-    """
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-
     cursor.execute("""
         SELECT t.* FROM telemetry_reading t
         WHERE t.error_code IS NOT NULL
@@ -343,20 +328,15 @@ def scan_telemetry():
     }
 
     incidents_created = 0
-
     for reading in readings:
         incident_id = str(uuid.uuid4())
         severity = severity_map.get(reading["error_code"], "Low")
-
-        # Opret incident
         cursor.execute(
             """INSERT INTO incident 
             (id, charger_id, incident_type, severity, status) 
             VALUES (%s, %s, %s, %s, 'Open')""",
             (incident_id, reading["charger_id"], reading["error_code"], severity)
         )
-
-        # Opret alert notification
         notification_id = str(uuid.uuid4())
         cursor.execute(
             """INSERT INTO alert_notification
@@ -364,8 +344,6 @@ def scan_telemetry():
             VALUES (%s, %s, %s, %s, %s)""",
             (notification_id, incident_id, "email", "tekniker@voltedge.dk", "Pending")
         )
-
-        # Opret technician assignment
         assignment_id = str(uuid.uuid4())
         cursor.execute(
             """INSERT INTO technician_assignment
@@ -373,17 +351,30 @@ def scan_telemetry():
             VALUES (%s, %s, %s, %s)""",
             (assignment_id, incident_id, "tech-001", False)
         )
-
         incidents_created += 1
 
     conn.commit()
     cursor.close()
     conn.close()
-
     return jsonify({
         "message": "Scanning færdig",
         "incidents_created": incidents_created
     })
+
+# ---------- ROOT CAUSE ANALYSIS ----------
+
+@app.route("/api/chargers/<string:charger_id>/root-cause", methods=["GET"])
+def root_cause(charger_id):
+    result = analyze_charger(charger_id)
+    return jsonify(result)
+
+@app.route("/api/stats/mttr", methods=["GET"])
+def mttr_stats():
+    return jsonify(get_mttr_stats())
+
+@app.route("/api/stats/incidents", methods=["GET"])
+def incident_stats():
+    return jsonify(get_incident_stats())
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
