@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS incident (
     severity VARCHAR(20),
     detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     resolved_at TIMESTAMP NULL,
+    root_cause_recommendation TEXT,
     status VARCHAR(20),
     FOREIGN KEY (charger_id) REFERENCES charger(id)
 );

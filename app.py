@@ -86,7 +86,7 @@ def get_charger(charger_id):
 @app.route("/api/telemetry", methods=["POST"])
 def receive_telemetry():
     data = request.get_json()
-    required_fields = ["id", "charger_id", "power_kw", "voltage", "current_a", "temperature", "recorded_at" ]
+    required_fields = ["id", "charger_id", "power_kw", "voltage", "current_a", "temperature", "recorded_at"]
     if not data or any(f not in data for f in required_fields):
         return jsonify({"error": f"Missing one of {required_fields}"}), 400
 
@@ -135,11 +135,16 @@ def receive_telemetry():
     incident_id = None
     if detected_incident and detected_incident != "GRID_OUTAGE":
         incident_id = str(uuid.uuid4())
+
+        # Kør root cause analyse automatisk
+        rca = analyze_charger(data["charger_id"])
+        recommendation = rca.get("recommendation", None)
+
         cursor.execute(
             """INSERT INTO incident 
-            (id, charger_id, incident_type, severity, status) 
-            VALUES (%s, %s, %s, %s, 'Open')""",
-            (incident_id, data["charger_id"], detected_incident, severity)
+            (id, charger_id, incident_type, severity, status, root_cause_recommendation) 
+            VALUES (%s, %s, %s, %s, 'Open', %s)""",
+            (incident_id, data["charger_id"], detected_incident, severity, recommendation)
         )
         notification_id = str(uuid.uuid4())
         cursor.execute(
@@ -229,6 +234,7 @@ def update_incident_ongoing(incident_id):
     cursor.close()
     conn.close()
     return jsonify({"message": f"Incident {incident_id} updated to Ongoing"})
+
 # ---------- TECHNICIAN ASSIGNMENTS API ----------
 
 @app.route("/api/assignments", methods=["GET"])
@@ -248,7 +254,7 @@ def get_assignments():
     return jsonify(rows)
 
 @app.route("/api/assignments/<string:tech_id>", methods=["GET"])
-def get_assignments(tech_id):
+def get_assignments_for_tech(tech_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
@@ -256,13 +262,14 @@ def get_assignments(tech_id):
         FROM technician_assignment ta
         JOIN incident i ON ta.incident_id = i.id
         JOIN charger c ON i.charger_id = c.id
-        ORDER BY ta.assigned_at DESC
         WHERE ta.technician_id = %s
+        ORDER BY ta.assigned_at DESC
     """, (tech_id,))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return jsonify(rows)
+
 # ---------- TECHNICIAN RESPOND ----------
 
 @app.route("/api/assignments/<string:assignment_id>/respond", methods=["PUT"])
@@ -366,11 +373,15 @@ def scan_telemetry():
     for reading in readings:
         incident_id = str(uuid.uuid4())
         severity = severity_map.get(reading["error_code"], "Low")
+
+        rca = analyze_charger(reading["charger_id"])
+        recommendation = rca.get("recommendation", None)
+
         cursor.execute(
             """INSERT INTO incident 
-            (id, charger_id, incident_type, severity, status) 
-            VALUES (%s, %s, %s, %s, 'Open')""",
-            (incident_id, reading["charger_id"], reading["error_code"], severity)
+            (id, charger_id, incident_type, severity, status, root_cause_recommendation) 
+            VALUES (%s, %s, %s, %s, 'Open', %s)""",
+            (incident_id, reading["charger_id"], reading["error_code"], severity, recommendation)
         )
         notification_id = str(uuid.uuid4())
         cursor.execute(
@@ -410,6 +421,76 @@ def mttr_stats():
 @app.route("/api/stats/incidents", methods=["GET"])
 def incident_stats():
     return jsonify(get_incident_stats())
+
+
+# ---------- BACKFILL ROOT CAUSE ----------
+
+@app.route("/api/backfill-root-cause", methods=["POST"])
+def backfill_root_cause():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT id, charger_id 
+        FROM incident
+        WHERE root_cause_recommendation IS NULL
+    """)
+    incidents = cursor.fetchall()
+    updated = 0
+    for incident in incidents:
+        rca = analyze_charger(incident["charger_id"])
+        recommendation = rca.get("recommendation", None)
+        if recommendation:
+            cursor.execute("""
+                UPDATE incident 
+                SET root_cause_recommendation = %s
+                WHERE id = %s
+            """, (recommendation, incident["id"]))
+            updated += 1
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({
+        "message": "Backfill færdig",
+        "incidents_updated": updated
+    })
+
+
+# ---------- STARTUP: BACKFILL ROOT CAUSE ----------
+
+@app.before_request
+def startup_backfill():
+    """
+    Kører én gang ved første request efter opstart
+    og udfylder root cause på alle incidents der mangler det
+    """
+    if not getattr(app, '_backfill_done', False):
+        app._backfill_done = True
+        try:
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT id, charger_id 
+                FROM incident
+                WHERE root_cause_recommendation IS NULL
+            """)
+            incidents = cursor.fetchall()
+            updated = 0
+            for incident in incidents:
+                rca = analyze_charger(incident["charger_id"])
+                recommendation = rca.get("recommendation", None)
+                if recommendation:
+                    cursor.execute("""
+                        UPDATE incident 
+                        SET root_cause_recommendation = %s
+                        WHERE id = %s
+                    """, (recommendation, incident["id"]))
+                    updated += 1
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print(f"✅ Startup backfill: {updated} incidents opdateret med root cause")
+        except Exception as e:
+            print(f"⚠️ Startup backfill fejlede: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
