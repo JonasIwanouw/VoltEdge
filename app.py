@@ -211,6 +211,24 @@ def resolve_incident(incident_id):
     conn.close()
     return jsonify({"message": f"Incident {incident_id} resolved"})
 
+@app.route("/api/incidents/<string:incident_id>/ongoing", methods=["PUT"])
+def update_incident_ongoing(incident_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM incident WHERE id = %s", (incident_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Incident not found"}), 404
+    cursor.execute(
+        "UPDATE incident SET status = 'Ongoing' WHERE id = %s",
+        (incident_id,)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({"message": f"Incident {incident_id} updated to Ongoing"})
 # ---------- TECHNICIAN ASSIGNMENTS API ----------
 
 @app.route("/api/assignments", methods=["GET"])
@@ -229,6 +247,22 @@ def get_assignments():
     conn.close()
     return jsonify(rows)
 
+@app.route("/api/assignments/<string:tech_id>", methods=["GET"])
+def get_assignments(tech_id):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT ta.*, i.incident_type, i.severity, c.location
+        FROM technician_assignment ta
+        JOIN incident i ON ta.incident_id = i.id
+        JOIN charger c ON i.charger_id = c.id
+        ORDER BY ta.assigned_at DESC
+        WHERE ta.technician_id = %s
+    """, (tech_id,))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return jsonify(rows)
 # ---------- TECHNICIAN RESPOND ----------
 
 @app.route("/api/assignments/<string:assignment_id>/respond", methods=["PUT"])
