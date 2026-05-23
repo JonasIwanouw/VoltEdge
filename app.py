@@ -86,7 +86,7 @@ def get_charger(charger_id):
 @app.route("/api/telemetry", methods=["POST"])
 def receive_telemetry():
     data = request.get_json()
-    required_fields = ["id", "charger_id", "power_kw", "voltage", "current_a", "temperature"]
+    required_fields = ["id", "charger_id", "power_kw", "voltage", "current_a", "temperature", "recorded_at" ]
     if not data or any(f not in data for f in required_fields):
         return jsonify({"error": f"Missing one of {required_fields}"}), 400
 
@@ -94,6 +94,7 @@ def receive_telemetry():
     voltage     = data["voltage"]
     current_a   = data["current_a"]
     temperature = data["temperature"]
+    recorded_at = data["recorded_at"]
     error_code  = data.get("error_code", None)
     grid_status = None
     detected_incident = None
@@ -125,9 +126,9 @@ def receive_telemetry():
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO telemetry_reading 
-        (id, charger_id, power_kw, voltage, current_a, temperature, error_code) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-        (data["id"], data["charger_id"], power_kw, voltage, current_a, temperature, error_code)
+        (id, charger_id, power_kw, voltage, current_a, temperature, error_code, recorded_at) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+        (data["id"], data["charger_id"], power_kw, voltage, current_a, temperature, error_code, recorded_at)
     )
     conn.commit()
 
@@ -378,4 +379,3 @@ def incident_stats():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
-    
