@@ -6,3 +6,7 @@ seed.sql
 
 # VSCode settings
 .vscode/
+
+__pycache__/
+*.pyc
+*.pyo
