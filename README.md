@@ -3,7 +3,7 @@
 ## Beskrivelse
 VoltEdge er en automatiseret incident management løsning til styring og overvågning af EV-ladeinfrastruktur. Systemet detekterer automatisk fejl på ladestandere baseret på realtids telemetri, opretter incidents, kontakter teknikere og udfører root cause analyse — uden manuelle mellemled.
 
-Løsningen er bygget med Domain Driven Design (DDD) og følger en microservice-inspireret arkitektur med Flask, MySQL og Docker.
+Løsningen er bygget med Domain Driven Design (DDD) og følger en modulær arkitektur med Flask, MySQL og Docker.
 
 ---
 
@@ -17,6 +17,7 @@ Løsningen er bygget med Domain Driven Design (DDD) og følger en microservice-i
 | CI/CD | GitHub Actions |
 | ML | scikit-learn (Random Forest) |
 | Ekstern integration | Energinet API (el-net status) |
+| API test | Postman |
 
 ---
 
@@ -27,13 +28,12 @@ VoltEdge/
   ├── .github/workflows/
   │     └── ci.yml                  ← GitHub Actions CI/CD pipeline
   ├── database/
-  │     └── init.sql                ← Database schema (tabeller og struktur)
+  │     └── init.sql                ← Database schema
+  ├── domain.py                     ← DDD: Value objects, entiteter og aggregate roots
   ├── app.py                        ← Flask API med alle endpoints
   ├── root_cause_analysis.py        ← Domain service: Root cause analyse
   ├── ml_service.py                 ← ML service: Predictive maintenance
   ├── generate_data.py              ← Script til generering af testdata
-  ├── ChargerDummyUnit.py           ← Simulator: Ladestander sender telemetri
-  ├── TeknikerDummyApp.py           ← Simulator: Tekniker accepterer/løser incidents
   ├── Dockerfile                    ← Container definition
   ├── docker-compose.yml            ← Multi-container setup
   ├── requirements.txt              ← Python pakker
@@ -43,33 +43,46 @@ VoltEdge/
 
 ---
 
-## Domænemodel (DDD)
+## DDD Domænemodel
 
-Løsningen er bygget på fire aggregater:
+Løsningen er implementeret efter Domain Driven Design med fire lag:
 
-- **Charger** — ladestanderens tilstand og telemetri (power, voltage, current, temperature)
-- **Incident** — fejlhændelser og deres livscyklus (Open → Assigned → Ongoing → Resolved)
-- **TechnicianAssignment** — teknikerkoordinering og opgavestyring
-- **AlertNotification** — notifikationer til teknikere
+### Value Objects
+Ingen identitet — defineres udelukkende af deres værdier:
+- **Temperature** — temperaturmåling med `is_critical()` og `risk_level()`
+- **Voltage** — spændingsmåling med `is_normal()` og `risk_level()`
+- **Current** — strømstyrke med `is_flowing()`
+- **Severity** — alvorlighed (Low/Medium/High/Critical)
+- **IncidentType** — fejltype (OVER_TEMPERATURE/NO_POWER/CABLE_DEFECT)
 
-Aggregaterne kommunikerer via domain events:
+### Entiteter
+Har identitet — to entiteter med samme data er ikke ens:
+- **TelemetryReading** — én telemetrimåling fra en ladestander
+- **TechnicianAssignment** — teknikers tildeling til et incident
+- **AlertNotification** — notifikation sendt til tekniker
+
+### Aggregate Roots
+Eneste indgang til aggregatet udefra:
+- **Charger** — detekterer anomalier via `detect_anomaly()`
+- **Incident** — håndterer livscyklus via `assign()`, `set_ongoing()`, `resolve()`
+
+### Domain Services
+Forretningslogik der går på tværs af aggregater:
+- **root_cause_analysis.py** — analyserer telemetrihistorik og giver anbefalinger
+- **ml_service.py** — predictive maintenance via Random Forest
+
+### Domain Events (implicit flow)
 ```
-Charger sender telemetri
-        ↓
-AnomalyDetected → Incident oprettes automatisk
-        ↓
-IncidentCreated → TechnicianAssignment + AlertNotification oprettes
-        ↓
-TechnicianResponds → Incident opdateres (Assigned)
-        ↓
-IncidentResolved → Incident lukkes
+AnomalyDetected → IncidentCreated → AssignmentCreated
+→ NotificationCreated → AssignmentAccepted → IncidentAssigned
+→ IncidentOngoing → IncidentResolved
 ```
 
 ---
 
 ## Incident Detection
 
-Systemet detekterer automatisk tre fejltyper baseret på telemetri:
+Systemet detekterer automatisk tre fejltyper:
 
 | Fejltype | Betingelse | Severity |
 |---|---|---|
@@ -84,7 +97,7 @@ Ved `NO_POWER` tjekkes Energinets live API for at skelne mellem intern fejl og e
 ## Kom i gang
 
 ### Krav
-- Docker 
+- Docker Desktop
 - Python 3.11+
 
 ### Start løsningen
@@ -131,7 +144,7 @@ curl -X POST http://127.0.0.1:5000/api/backfill-root-cause
 |---|---|---|
 | GET | `/ping` | Health check |
 | GET | `/api/chargers` | Hent alle ladestandere |
-| POST | `/api/telemetry` | Modtag telemetri og detekter fejl |
+| POST | `/api/telemetry` | Modtag telemetri og detekter fejl automatisk |
 | GET | `/api/incidents` | Hent alle incidents |
 | PUT | `/api/incidents/<id>/resolve` | Løs et incident |
 | PUT | `/api/incidents/<id>/ongoing` | Sæt incident til igangværende |
@@ -148,30 +161,44 @@ curl -X POST http://127.0.0.1:5000/api/backfill-root-cause
 
 ---
 
-## Simulatorer
+## Test med Postman
 
-**ChargerDummyUnit.py** — simulerer en ladestander der sender live telemetri:
-```bash
-python3 ChargerDummyUnit.py
+Løsningen testes via Postman med tre requests der simulerer det fulde flow:
+
+**1. ChargerDummyUnit — Send telemetri (POST /api/telemetry)**
+```json
+{
+    "id": "uuid",
+    "charger_id": "charger-uuid",
+    "power_kw": 0.0,
+    "voltage": 230.0,
+    "current_a": 0.0,
+    "temperature": 95.0,
+    "recorded_at": "2026-05-26 10:00:00"
+}
 ```
 
-**TeknikerDummyApp.py** — simulerer en tekniker der modtager og løser en opgave:
-```bash
-python3 TeknikerDummyApp.py
+**2. TeknikerDummyApp — Accepter opgave (PUT /api/assignments/<id>/respond)**
+```json
+{
+    "accept": true
+}
 ```
+
+**3. TeknikerDummyApp — Løs incident (PUT /api/incidents/<id>/resolve)**
 
 ---
 
 ## ML — Predictive Maintenance
 
-`ml_service.py` træner en Random Forest model på telemetri-data og forudsiger fejltype baseret på målinger:
+`ml_service.py` træner en Random Forest model på telemetri-data:
 
 ```bash
 python3 ml_service.py
 ```
 
 **Feature importance:**
-- `current_a`: 38% — vigtigste indikator
+- `current_a`: 38%
 - `power_kw`: 27%
 - `temperature`: 18%
 - `voltage`: 16%
@@ -189,11 +216,12 @@ GitHub Actions pipeline kører automatisk ved hvert push til `main`:
 
 ---
 
-## Sikkerhed
+## Sikkerhed (DevSecOps)
 
-- Passwords gemmes i `.env` filen — aldrig i kode eller GitHub
-- Testdata (`seed.sql`) og `.env` er i `.gitignore`
+- Passwords gemmes i `.env` — aldrig i kode eller GitHub
+- `seed.sql` og `.env` er i `.gitignore`
 - CI/CD bruger separate testpasswords
+- Docker Compose overfører miljøvariable via environment-sektionen
 
 ---
 
