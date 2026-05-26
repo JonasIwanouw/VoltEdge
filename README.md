@@ -3,7 +3,7 @@
 ## Beskrivelse
 VoltEdge er en automatiseret incident management løsning til styring og overvågning af EV-ladeinfrastruktur. Systemet detekterer automatisk fejl på ladestandere baseret på realtids telemetri, opretter incidents, kontakter teknikere og udfører root cause analyse — uden manuelle mellemled.
 
-Løsningen er bygget med Domain Driven Design (DDD) og følger en modulær arkitektur med Flask, MySQL og Docker.
+Løsningen er bygget med Domain Driven Design (DDD) og opdelt i tre bounded contexts med repository pattern, eksplicitte domain events og fuldt testdækning.
 
 ---
 
@@ -18,6 +18,7 @@ Løsningen er bygget med Domain Driven Design (DDD) og følger en modulær arkit
 | ML | scikit-learn (Random Forest) |
 | Ekstern integration | Energinet API (el-net status) |
 | API test | Postman |
+| Unit tests | pytest (44 tests) |
 
 ---
 
@@ -26,52 +27,71 @@ Løsningen er bygget med Domain Driven Design (DDD) og følger en modulær arkit
 ```
 VoltEdge/
   ├── .github/workflows/
-  │     └── ci.yml                  ← GitHub Actions CI/CD pipeline
+  │     └── ci.yml                        ← GitHub Actions CI/CD pipeline
+  │
+  ├── device_management/                  ← Bounded Context: Device Management
+  │     ├── __init__.py
+  │     ├── charger.py                    ← Charger aggregate root + value objects
+  │     └── charger_repository.py        ← Repository pattern for Charger
+  │
+  ├── incident_management/               ← Bounded Context: Incident Management
+  │     ├── __init__.py
+  │     ├── incident.py                  ← Incident aggregate root + value objects
+  │     ├── technician_assignment.py     ← TechnicianAssignment aggregate root
+  │     └── incident_repository.py      ← Repository pattern for Incident + Assignment
+  │
+  ├── notification/                      ← Bounded Context: Notification
+  │     ├── __init__.py
+  │     ├── alert_notification.py        ← AlertNotification aggregate root
+  │     └── notification_repository.py  ← Repository pattern for Notification
+  │
+  ├── tests/
+  │     ├── test_domain.py               ← 44 unit tests for DDD klasser
+  │     └── test_api.py                  ← API integration tests
+  │
   ├── database/
-  │     └── init.sql                ← Database schema
-  ├── domain.py                     ← DDD: Value objects, entiteter og aggregate roots
-  ├── app.py                        ← Flask API med alle endpoints
-  ├── root_cause_analysis.py        ← Domain service: Root cause analyse
-  ├── ml_service.py                 ← ML service: Predictive maintenance
-  ├── generate_data.py              ← Script til generering af testdata
-  ├── Dockerfile                    ← Container definition
-  ├── docker-compose.yml            ← Multi-container setup
-  ├── requirements.txt              ← Python pakker
-  ├── .gitignore                    ← Ignorerer .env og seed.sql
-  └── README.md
+  │     └── init.sql                     ← Database schema
+  │
+  ├── events.py                          ← Eksplicitte domain events
+  ├── root_cause_analysis.py             ← Domain service: Root cause analyse
+  ├── ml_service.py                      ← ML service: Predictive maintenance
+  ├── app.py                             ← Flask API — orkestrerer bounded contexts
+  ├── generate_data.py                   ← Script til generering af testdata
+  ├── Dockerfile                         ← Container definition
+  ├── docker-compose.yml                 ← Multi-container setup
+  ├── requirements.txt                   ← Python pakker
+  └── .gitignore
 ```
 
 ---
 
 ## DDD Domænemodel
 
-Løsningen er implementeret efter Domain Driven Design med fire lag:
+### Bounded Contexts
 
-### Value Objects
-Ingen identitet — defineres udelukkende af deres værdier:
-- **Temperature** — temperaturmåling med `is_critical()` og `risk_level()`
-- **Voltage** — spændingsmåling med `is_normal()` og `risk_level()`
-- **Current** — strømstyrke med `is_flowing()`
-- **Severity** — alvorlighed (Low/Medium/High/Critical)
-- **IncidentType** — fejltype (OVER_TEMPERATURE/NO_POWER/CABLE_DEFECT)
+**Device Management** — alt der handler om ladestandere og telemetri:
+- `Charger` (aggregate root) — detekterer anomalier via `detect_anomaly()`
+- `TelemetryReading` (entitet) — én måling fra en ladestander
+- Value objects: `Temperature`, `Voltage`, `Current`
 
-### Entiteter
-Har identitet — to entiteter med samme data er ikke ens:
-- **TelemetryReading** — én telemetrimåling fra en ladestander
-- **TechnicianAssignment** — teknikers tildeling til et incident
-- **AlertNotification** — notifikation sendt til tekniker
+**Incident Management** — alt der handler om fejlhændelser og teknikere:
+- `Incident` (aggregate root) — livscyklus Open → Assigned → Ongoing → Resolved
+- `TechnicianAssignment` (aggregate root) — accept/afvis logik
+- Value objects: `Severity`, `IncidentType`
 
-### Aggregate Roots
-Eneste indgang til aggregatet udefra:
-- **Charger** — detekterer anomalier via `detect_anomaly()`
-- **Incident** — håndterer livscyklus via `assign()`, `set_ongoing()`, `resolve()`
+**Notification** — alt der handler om notifikationer:
+- `AlertNotification` (aggregate root) — leveringsstatus
 
-### Domain Services
-Forretningslogik der går på tværs af aggregater:
-- **root_cause_analysis.py** — analyserer telemetrihistorik og giver anbefalinger
-- **ml_service.py** — predictive maintenance via Random Forest
+### Repository Pattern
+Al databaseadgang går via repositories — API-laget skriver aldrig SQL direkte:
+```python
+# API bruger repository — ikke SQL direkte
+charger = charger_repo.get(charger_id)
+incident_repo.save(incident)
+```
 
-### Domain Events (implicit flow)
+### Domain Events
+Eksplicitte events i `events.py` dokumenterer hvad der sker i systemet:
 ```
 AnomalyDetected → IncidentCreated → AssignmentCreated
 → NotificationCreated → AssignmentAccepted → IncidentAssigned
@@ -82,15 +102,12 @@ AnomalyDetected → IncidentCreated → AssignmentCreated
 
 ## Incident Detection
 
-Systemet detekterer automatisk tre fejltyper:
-
 | Fejltype | Betingelse | Severity |
 |---|---|---|
 | `OVER_TEMPERATURE` | Temperatur > 80°C | Critical |
 | `NO_POWER` | Voltage < 200V (og el-net OK) | High |
 | `CABLE_DEFECT` | Current < 0.1A trods normal voltage | Medium |
-
-Ved `NO_POWER` tjekkes Energinets live API for at skelne mellem intern fejl og ekstern strømafbrydelse.
+| `GRID_OUTAGE` | Voltage < 200V + Energinet GRID_STRESS | High |
 
 ---
 
@@ -121,7 +138,7 @@ DB_NAME=voltedge
 docker compose up -d
 ```
 
-**4. Generer testdata (1000 ladestandere, ~15.000 målinger):**
+**4. Generer testdata:**
 ```bash
 python3 generate_data.py
 ```
@@ -131,9 +148,9 @@ python3 generate_data.py
 curl -X POST http://127.0.0.1:5000/api/scan-telemetry
 ```
 
-**6. Udfyld root cause på alle incidents:**
+**6. Kør unit tests:**
 ```bash
-curl -X POST http://127.0.0.1:5000/api/backfill-root-cause
+python3 -m pytest tests/ -v
 ```
 
 ---
@@ -144,7 +161,7 @@ curl -X POST http://127.0.0.1:5000/api/backfill-root-cause
 |---|---|---|
 | GET | `/ping` | Health check |
 | GET | `/api/chargers` | Hent alle ladestandere |
-| POST | `/api/telemetry` | Modtag telemetri og detekter fejl automatisk |
+| POST | `/api/telemetry` | Modtag telemetri og detekter fejl |
 | GET | `/api/incidents` | Hent alle incidents |
 | PUT | `/api/incidents/<id>/resolve` | Løs et incident |
 | PUT | `/api/incidents/<id>/ongoing` | Sæt incident til igangværende |
@@ -163,7 +180,7 @@ curl -X POST http://127.0.0.1:5000/api/backfill-root-cause
 
 ## Test med Postman
 
-Løsningen testes via Postman med tre requests der simulerer det fulde flow:
+Tre requests simulerer det fulde flow:
 
 **1. ChargerDummyUnit — Send telemetri (POST /api/telemetry)**
 ```json
@@ -180,24 +197,33 @@ Løsningen testes via Postman med tre requests der simulerer det fulde flow:
 
 **2. TeknikerDummyApp — Accepter opgave (PUT /api/assignments/<id>/respond)**
 ```json
-{
-    "accept": true
-}
+{ "accept": true }
 ```
 
 **3. TeknikerDummyApp — Løs incident (PUT /api/incidents/<id>/resolve)**
 
 ---
 
-## ML — Predictive Maintenance
+## Unit Tests
 
-`ml_service.py` træner en Random Forest model på telemetri-data:
+44 tests dækker alle DDD klasser:
+
+```bash
+python3 -m pytest tests/test_domain.py -v
+# 44 passed in 1.74s
+```
+
+Tests dækker value objects, aggregate roots og entiteter — herunder edge cases som at resolve et Open incident kaster en ValueError.
+
+---
+
+## ML — Predictive Maintenance
 
 ```bash
 python3 ml_service.py
 ```
 
-**Feature importance:**
+Random Forest model trænet på telemetri — feature importance:
 - `current_a`: 38%
 - `power_kw`: 27%
 - `temperature`: 18%
@@ -207,21 +233,21 @@ python3 ml_service.py
 
 ## CI/CD
 
-GitHub Actions pipeline kører automatisk ved hvert push til `main`:
+GitHub Actions kører automatisk ved push til `main`:
 1. Starter MySQL testdatabase
 2. Opretter tabeller via `init.sql`
-3. Installerer Python pakker
-4. Kører tests
-5. Bygger Docker image
+3. Installerer pakker
+4. Kører 44 unit tests
+5. Bygger Docker image (kun hvis tests passer)
 
 ---
 
 ## Sikkerhed (DevSecOps)
 
-- Passwords gemmes i `.env` — aldrig i kode eller GitHub
-- `seed.sql` og `.env` er i `.gitignore`
+- Passwords i `.env` — aldrig i kode eller GitHub
+- `seed.sql` og `.env` i `.gitignore`
 - CI/CD bruger separate testpasswords
-- Docker Compose overfører miljøvariable via environment-sektionen
+- Docker Compose overfører miljøvariable via environment
 
 ---
 
