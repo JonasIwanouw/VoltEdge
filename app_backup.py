@@ -5,7 +5,6 @@ import uuid
 import requests
 from dotenv import load_dotenv
 from root_cause_analysis import analyze_charger, get_mttr_stats, get_incident_stats
-from domain import Charger, Incident, TelemetryReading, IncidentType, Severity
 
 load_dotenv()
 
@@ -20,6 +19,12 @@ def get_connection():
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME")
     )
+
+# ---------- THRESHOLDS ----------
+
+TEMP_THRESHOLD = 80.0
+VOLTAGE_MIN = 200.0
+CURRENT_MIN = 0.1
 
 # ---------- ENERGINET GRID CHECK ----------
 
@@ -85,102 +90,71 @@ def receive_telemetry():
     if not data or any(f not in data for f in required_fields):
         return jsonify({"error": f"Missing one of {required_fields}"}), 400
 
-    # ---------- DDD: Opret TelemetryReading value object ----------
-    try:
-        reading = TelemetryReading(
-            id=data["id"],
-            charger_id=data["charger_id"],
-            power_kw=data["power_kw"],
-            voltage=data["voltage"],
-            current_a=data["current_a"],
-            temperature=data["temperature"],
-            recorded_at=data["recorded_at"],
-            error_code=data.get("error_code", None)
-        )
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    # ---------- DDD: Hent Charger aggregate root ----------
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM charger WHERE id = %s", (data["charger_id"],))
-    charger_row = cursor.fetchone()
-
-    if not charger_row:
-        cursor.close()
-        conn.close()
-        return jsonify({"error": "Charger not found"}), 404
-
-    charger = Charger(
-        id=charger_row["id"],
-        location=charger_row["location"],
-        vendor=charger_row["vendor"],
-        model=charger_row["model"],
-        firmware=charger_row["firmware"],
-        status=charger_row["status"]
-    )
-
-    # ---------- DDD: Kald detect_anomaly på Charger aggregatet ----------
+    power_kw    = data["power_kw"]
+    voltage     = data["voltage"]
+    current_a   = data["current_a"]
+    temperature = data["temperature"]
+    recorded_at = data["recorded_at"]
+    error_code  = data.get("error_code", None)
     grid_status = None
-    if not reading.voltage.is_normal():
+    detected_incident = None
+    severity = None
+
+    if temperature > TEMP_THRESHOLD:
+        detected_incident = "OVER_TEMPERATURE"
+        severity = "Critical"
+        error_code = "OVER_TEMPERATURE"
+    elif voltage < VOLTAGE_MIN:
         grid_status = check_grid_status("DK1")
+        if grid_status == "GRID_STRESS":
+            detected_incident = "GRID_OUTAGE"
+            severity = "High"
+            error_code = "GRID_OUTAGE"
+        else:
+            detected_incident = "NO_POWER"
+            severity = "High"
+            error_code = "NO_POWER"
+    elif current_a < CURRENT_MIN and voltage >= VOLTAGE_MIN:
+        detected_incident = "CABLE_DEFECT"
+        severity = "Medium"
+        error_code = "CABLE_DEFECT"
+    elif error_code is not None:
+        detected_incident = "CONNECTOR_FAULT"
+        severity = "Medium"
 
-    incident_type_obj, severity_obj = charger.detect_anomaly(reading, grid_status or "GRID_OK")
-
-    # Opdater error_code baseret på detektion
-    error_code = incident_type_obj.code if incident_type_obj else data.get("error_code", None)
-
-    # ---------- GEM TELEMETRI I DATABASEN ----------
-    cursor2 = conn.cursor()
-    cursor2.execute(
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
         """INSERT INTO telemetry_reading 
         (id, charger_id, power_kw, voltage, current_a, temperature, error_code, recorded_at) 
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-        (reading.id, reading.charger_id, reading.power_kw,
-         reading.voltage.volts, reading.current_a.ampere,
-         reading.temperature.celsius, error_code, reading.recorded_at)
+        (data["id"], data["charger_id"], power_kw, voltage, current_a, temperature, error_code, recorded_at)
     )
     conn.commit()
 
-    # ---------- DDD: Opret Incident aggregate root hvis anomali ----------
     incident_id = None
-    recommendation = None
-
-    if incident_type_obj and not incident_type_obj.is_grid_related():
+    if detected_incident and detected_incident != "GRID_OUTAGE":
         incident_id = str(uuid.uuid4())
 
-        # Kør root cause analyse
+        # Kør root cause analyse automatisk
         rca = analyze_charger(data["charger_id"])
         recommendation = rca.get("recommendation", None)
 
-        # Opret Incident domæneobjekt
-        incident = Incident(
-            id=incident_id,
-            charger_id=data["charger_id"],
-            incident_type=incident_type_obj,
-            severity=severity_obj,
-            root_cause_recommendation=recommendation
-        )
-
-        cursor2.execute(
+        cursor.execute(
             """INSERT INTO incident 
             (id, charger_id, incident_type, severity, status, root_cause_recommendation) 
-            VALUES (%s, %s, %s, %s, %s, %s)""",
-            (incident.id, incident.charger_id,
-             incident.incident_type.code, incident.severity.level,
-             incident.status, incident.root_cause_recommendation)
+            VALUES (%s, %s, %s, %s, 'Open', %s)""",
+            (incident_id, data["charger_id"], detected_incident, severity, recommendation)
         )
-
         notification_id = str(uuid.uuid4())
-        cursor2.execute(
+        cursor.execute(
             """INSERT INTO alert_notification
             (id, incident_id, channel, recipient, delivery_status)
             VALUES (%s, %s, %s, %s, %s)""",
             (notification_id, incident_id, "email", "tekniker@voltedge.dk", "Pending")
         )
-
         assignment_id = str(uuid.uuid4())
-        cursor2.execute(
+        cursor.execute(
             """INSERT INTO technician_assignment
             (id, incident_id, technician_id, confirmed)
             VALUES (%s, %s, %s, %s)""",
@@ -189,20 +163,19 @@ def receive_telemetry():
         conn.commit()
 
     cursor.close()
-    cursor2.close()
     conn.close()
 
     return jsonify({
-        "status": "ALARM" if incident_type_obj else "OK",
-        "incident_type": incident_type_obj.code if incident_type_obj else None,
+        "status": "ALARM" if detected_incident else "OK",
+        "incident_type": detected_incident,
         "incident_id": incident_id,
-        "severity": severity_obj.level if severity_obj else None,
+        "severity": severity,
         "grid_status": grid_status,
         "readings": {
-            "power_kw": reading.power_kw,
-            "voltage": reading.voltage.volts,
-            "current_a": reading.current_a.ampere,
-            "temperature": reading.temperature.celsius,
+            "power_kw": power_kw,
+            "voltage": voltage,
+            "current_a": current_a,
+            "temperature": temperature,
             "error_code": error_code
         }
     }), 201
@@ -227,76 +200,38 @@ def get_incidents():
 @app.route("/api/incidents/<string:incident_id>/resolve", methods=["PUT"])
 def resolve_incident(incident_id):
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM incident WHERE id = %s", (incident_id,))
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM incident WHERE id = %s", (incident_id,))
     row = cursor.fetchone()
     if not row:
         cursor.close()
         conn.close()
         return jsonify({"error": "Incident not found"}), 404
-
-    # ---------- DDD: Brug Incident aggregate root til at resolve ----------
-    incident = Incident(
-        id=row["id"],
-        charger_id=row["charger_id"],
-        incident_type=IncidentType(row["incident_type"]),
-        severity=Severity(row["severity"])
-    )
-    incident.status = row["status"]
-
-    try:
-        incident.resolve()
-    except ValueError as e:
-        cursor.close()
-        conn.close()
-        return jsonify({"error": str(e)}), 400
-
-    cursor2 = conn.cursor()
-    cursor2.execute(
+    cursor.execute(
         "UPDATE incident SET status = 'Resolved', resolved_at = NOW() WHERE id = %s",
         (incident_id,)
     )
     conn.commit()
     cursor.close()
-    cursor2.close()
     conn.close()
     return jsonify({"message": f"Incident {incident_id} resolved"})
 
 @app.route("/api/incidents/<string:incident_id>/ongoing", methods=["PUT"])
 def update_incident_ongoing(incident_id):
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM incident WHERE id = %s", (incident_id,))
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM incident WHERE id = %s", (incident_id,))
     row = cursor.fetchone()
     if not row:
         cursor.close()
         conn.close()
         return jsonify({"error": "Incident not found"}), 404
-
-    # ---------- DDD: Brug Incident aggregate root ----------
-    incident = Incident(
-        id=row["id"],
-        charger_id=row["charger_id"],
-        incident_type=IncidentType(row["incident_type"]),
-        severity=Severity(row["severity"])
-    )
-    incident.status = row["status"]
-
-    try:
-        incident.set_ongoing()
-    except ValueError as e:
-        cursor.close()
-        conn.close()
-        return jsonify({"error": str(e)}), 400
-
-    cursor2 = conn.cursor()
-    cursor2.execute(
+    cursor.execute(
         "UPDATE incident SET status = 'Ongoing' WHERE id = %s",
         (incident_id,)
     )
     conn.commit()
     cursor.close()
-    cursor2.close()
     conn.close()
     return jsonify({"message": f"Incident {incident_id} updated to Ongoing"})
 
@@ -487,6 +422,7 @@ def mttr_stats():
 def incident_stats():
     return jsonify(get_incident_stats())
 
+
 # ---------- BACKFILL ROOT CAUSE ----------
 
 @app.route("/api/backfill-root-cause", methods=["POST"])
@@ -517,6 +453,44 @@ def backfill_root_cause():
         "message": "Backfill færdig",
         "incidents_updated": updated
     })
+
+
+# ---------- STARTUP: BACKFILL ROOT CAUSE ----------
+
+@app.before_request
+def startup_backfill():
+    """
+    Kører én gang ved første request efter opstart
+    og udfylder root cause på alle incidents der mangler det
+    """
+    if not getattr(app, '_backfill_done', False):
+        app._backfill_done = True
+        try:
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT id, charger_id 
+                FROM incident
+                WHERE root_cause_recommendation IS NULL
+            """)
+            incidents = cursor.fetchall()
+            updated = 0
+            for incident in incidents:
+                rca = analyze_charger(incident["charger_id"])
+                recommendation = rca.get("recommendation", None)
+                if recommendation:
+                    cursor.execute("""
+                        UPDATE incident 
+                        SET root_cause_recommendation = %s
+                        WHERE id = %s
+                    """, (recommendation, incident["id"]))
+                    updated += 1
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print(f"✅ Startup backfill: {updated} incidents opdateret med root cause")
+        except Exception as e:
+            print(f"⚠️ Startup backfill fejlede: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", debug=True)
