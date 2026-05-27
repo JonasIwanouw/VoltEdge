@@ -14,14 +14,38 @@ def get_connection():
         database=os.getenv("DB_NAME")
     )
 
-# Thresholds — samme som i app.py
+# Thresholds
 TEMP_THRESHOLD = 80.0
 VOLTAGE_MIN = 200.0
 CURRENT_MIN = 0.1
 
 # ---------- ANBEFALING ----------
 
-def get_recommendation(root_cause, temp_trend, voltage_trend, current_trend, is_recurring):
+def get_recommendation(root_cause, temp_trend, voltage_trend, current_trend, is_recurring, readings=None):
+    
+    # ---------- SENSOR FEJL OG EKSTREME VÆRDIER ----------
+    # Tjekkes først da de kræver øjeblikkelig handling
+    if readings:
+        latest = readings[0]
+        temp = float(latest["temperature"])
+        voltage = float(latest["voltage"])
+        current = float(latest["current_a"])
+
+        # Sensor fejl — fysisk umulige værdier
+        if temp < -30:
+            return "Sensor fejl — temperatursensor måler under -30°C, udskiftning nødvendig"
+        if voltage < 0:
+            return "Sensor fejl — spændingssensor måler negativ værdi, udskiftning nødvendig"
+        if current < 0:
+            return "Sensor fejl — strømsensor måler negativ værdi, udskiftning nødvendig"
+
+        # Kritiske reelle fejl — farlige men fysisk mulige
+        if voltage > 1000:
+            return "KRITISK — Farlig overspænding over 1000V, brand- og eksplosionsrisiko, afbryd strøm øjeblikkeligt"
+        if current > 500:
+            return "KRITISK — Overstrøm over 500A, kortslutning mulig, afbryd strøm øjeblikkeligt"
+
+    # ---------- NORMALE ANBEFALINGER ----------
     if is_recurring:
         return "Strukturelt problem — ladestander bør udskiftes eller gennemgå dybere inspektion"
     if root_cause == "OVER_TEMPERATURE":
@@ -66,17 +90,17 @@ def analyze_charger(charger_id):
     # ---------- TEMPERATUR TREND ----------
     temps = [r["temperature"] for r in readings]
     temp_trend = "STIGENDE" if temps[0] > temps[-1] else "FALDENDE" if temps[0] < temps[-1] else "STABIL"
-    temp_risk = "HØJ" if temps[0] > 70 else "MEDIUM" if temps[0] > 55 else "LAV"
+    temp_risk = "HØJ" if temps[0] > 70 or temps[0] < -30 else "MEDIUM" if temps[0] > 55 else "LAV"
 
     # ---------- VOLTAGE TREND ----------
     voltages = [r["voltage"] for r in readings]
     voltage_trend = "FALDENDE" if voltages[0] < voltages[-1] else "STIGENDE" if voltages[0] > voltages[-1] else "STABIL"
-    voltage_risk = "HØJ" if voltages[0] < 180 else "MEDIUM" if voltages[0] < 200 else "LAV"
+    voltage_risk = "HØJ" if voltages[0] < 0 or voltages[0] > 1000 else "HØJ" if voltages[0] < 180 else "MEDIUM" if voltages[0] < 200 else "LAV"
 
     # ---------- CURRENT TREND ----------
     currents = [r["current_a"] for r in readings]
     current_trend = "FALDENDE" if currents[0] < currents[-1] else "STIGENDE" if currents[0] > currents[-1] else "STABIL"
-    current_risk = "HØJ" if currents[0] < CURRENT_MIN and voltages[0] >= VOLTAGE_MIN else "LAV"
+    current_risk = "HØJ" if currents[0] < 0 or currents[0] > 500 else "HØJ" if currents[0] < CURRENT_MIN and voltages[0] >= VOLTAGE_MIN else "LAV"
 
     # ---------- RECURRING INCIDENTS ----------
     cursor.execute("""
@@ -134,7 +158,7 @@ def analyze_charger(charger_id):
         "root_cause": root_cause,
         "avg_mttr_minutes": avg_mttr,
         "recommendation": get_recommendation(
-            root_cause, temp_trend, voltage_trend, current_trend, is_recurring
+            root_cause, temp_trend, voltage_trend, current_trend, is_recurring, readings
         )
     }
 
