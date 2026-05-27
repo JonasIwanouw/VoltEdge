@@ -51,7 +51,7 @@ for i in range(1000):
     firmware = random.choice(firmwares)
     status = random.choices(
         ["available", "occupied", "faulted"],
-        weights=[70, 20, 10]  # 70% available, 20% occupied, 10% faulted
+        weights=[70, 20, 10]
     )[0]
 
     cursor.execute(
@@ -68,20 +68,33 @@ print("Genererer telemetri målinger...")
 
 total_readings = 0
 for charger_id in charger_ids:
-    # Hver ladestander får 10-20 målinger
     num_readings = random.randint(10, 20)
     
     for j in range(num_readings):
         reading_id = str(uuid.uuid4())
         recorded_at = datetime.now() - timedelta(hours=random.randint(0, 72))
 
-        # 80% normale målinger
-        # 8% overtemperatur
-        # 7% ingen strøm
-        # 5% ledningsskade
+        # Fordeling af scenarier:
+        # 75% normale målinger
+        # 8%  overtemperatur
+        # 7%  ingen strøm
+        # 5%  ledningsskade
+        # 2%  sensor fejl (temperatur)
+        # 1%  sensor fejl (voltage)
+        # 1%  sensor fejl (current)
+        # 1%  overspænding
         scenario = random.choices(
-            ["normal", "over_temp", "no_power", "cable_defect"],
-            weights=[80, 8, 7, 5]
+            [
+                "normal",
+                "over_temp",
+                "no_power",
+                "cable_defect",
+                "sensor_temp",
+                "sensor_voltage",
+                "sensor_current",
+                "overvoltage",
+            ],
+            weights=[75, 8, 7, 5, 2, 1, 1, 1]
         )[0]
 
         if scenario == "normal":
@@ -95,7 +108,7 @@ for charger_id in charger_ids:
             power_kw = round(random.uniform(0.0, 5.0), 2)
             voltage = round(random.uniform(220.0, 240.0), 2)
             current_a = round(random.uniform(0.0, 5.0), 2)
-            temperature = round(random.uniform(81.0, 110.0), 2)
+            temperature = round(random.uniform(81.0, 120.0), 2)
             error_code = "OVER_TEMPERATURE"
 
         elif scenario == "no_power":
@@ -105,12 +118,44 @@ for charger_id in charger_ids:
             temperature = round(random.uniform(15.0, 40.0), 2)
             error_code = "NO_POWER"
 
-        else:  # cable_defect
+        elif scenario == "cable_defect":
             power_kw = 0.0
             voltage = round(random.uniform(220.0, 240.0), 2)
             current_a = 0.0
             temperature = round(random.uniform(15.0, 60.0), 2)
             error_code = "CABLE_DEFECT"
+
+        elif scenario == "sensor_temp":
+            # Defekt temperatursensor — måler under -30°C
+            power_kw = round(random.uniform(3.0, 22.0), 2)
+            voltage = round(random.uniform(220.0, 240.0), 2)
+            current_a = round(random.uniform(10.0, 32.0), 2)
+            temperature = round(random.uniform(-60.0, -31.0), 2)
+            error_code = "OVER_TEMPERATURE"
+
+        elif scenario == "sensor_voltage":
+            # Defekt spændingssensor — måler negativ værdi
+            power_kw = 0.0
+            voltage = round(random.uniform(-50.0, -1.0), 2)
+            current_a = 0.0
+            temperature = round(random.uniform(15.0, 40.0), 2)
+            error_code = "NO_POWER"
+
+        elif scenario == "sensor_current":
+            # Defekt strømsensor — måler negativ værdi
+            power_kw = 0.0
+            voltage = round(random.uniform(220.0, 240.0), 2)
+            current_a = round(random.uniform(-50.0, -1.0), 2)
+            temperature = round(random.uniform(15.0, 40.0), 2)
+            error_code = "CABLE_DEFECT"
+
+        elif scenario == "overvoltage":
+            # Farlig overspænding — over 1000V
+            power_kw = round(random.uniform(0.0, 5.0), 2)
+            voltage = round(random.uniform(1001.0, 1200.0), 2)
+            current_a = round(random.uniform(0.0, 5.0), 2)
+            temperature = round(random.uniform(15.0, 60.0), 2)
+            error_code = "NO_POWER"
 
         cursor.execute(
             """INSERT INTO telemetry_reading 
@@ -123,6 +168,16 @@ for charger_id in charger_ids:
 conn.commit()
 print(f"✅ {total_readings} telemetri målinger oprettet")
 print(f"✅ Data generering færdig!")
+print(f"")
+print(f"Fordeling:")
+print(f"  75% normale målinger")
+print(f"  8%  OVER_TEMPERATURE")
+print(f"  7%  NO_POWER")
+print(f"  5%  CABLE_DEFECT")
+print(f"  2%  Sensor fejl (temperatur)")
+print(f"  1%  Sensor fejl (voltage)")
+print(f"  1%  Sensor fejl (current)")
+print(f"  1%  Overspænding")
 
 cursor.close()
 conn.close()
