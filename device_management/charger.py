@@ -19,8 +19,8 @@ class Temperature:
     celsius: float
 
     def __post_init__(self):
-        if self.celsius < -50 or self.celsius > 300:
-            raise ValueError(f"Ugyldig temperatur: {self.celsius}°C")
+        if self.celsius < -30 or self.celsius > 120:
+            raise ValueError(f"Ugyldig temperatur: {self.celsius}°C — skal være mellem -30°C og 120°C")
 
     def is_critical(self) -> bool:
         return self.celsius > 80.0
@@ -35,8 +35,15 @@ class Temperature:
 
 @dataclass(frozen=True)
 class Voltage:
-    """Value Object: Spændingsmåling i volt."""
+    """
+    Value Object: Spændingsmåling i volt.
+    Normal spænding er mellem 200-1000V (AC og DC ladere).
+    """
     volts: float
+
+    def __post_init__(self):
+        if self.volts < 0 or self.volts > 1000:
+            raise ValueError(f"Ugyldig voltage: {self.volts}V — skal være mellem 0V og 1000V")
 
     def is_normal(self) -> bool:
         return self.volts >= 200.0
@@ -51,8 +58,15 @@ class Voltage:
 
 @dataclass(frozen=True)
 class Current:
-    """Value Object: Strømstyrke i ampere."""
+    """
+    Value Object: Strømstyrke i ampere.
+    Max 500A dækker både AC og DC hurtigladere.
+    """
     ampere: float
+
+    def __post_init__(self):
+        if self.ampere < 0 or self.ampere > 500:
+            raise ValueError(f"Ugyldig strømstyrke: {self.ampere}A — skal være mellem 0A og 500A")
 
     def is_flowing(self) -> bool:
         return self.ampere >= 0.1
@@ -92,7 +106,7 @@ class Charger:
     """
     Aggregate Root: Charger
     Bounded Context: Device Management
-    
+
     Ansvarlig for detektion af anomalier i telemetrimålinger.
     Al anomaly detection logik lever her — ikke i API-laget.
     """
