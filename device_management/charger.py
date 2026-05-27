@@ -14,19 +14,25 @@ from typing import Optional
 class Temperature:
     """
     Value Object: Temperaturmåling i celsius.
-    Indeholder domænelogik for hvornår temperaturen er unormal.
+    
+    Ingen hard validering — ekstreme værdier er symptomer på fejl.
+    Eksempler:
+    - Under -30°C → sensor fejl eller ekstrem kulde
+    - Over 120°C  → kølesystem fejl eller brand risiko
+    Begge skal generere incidents frem for at crashe systemet.
     """
     celsius: float
 
-    def __post_init__(self):
-        if self.celsius < -30 or self.celsius > 120:
-            raise ValueError(f"Ugyldig temperatur: {self.celsius}°C — skal være mellem -30°C og 120°C")
-
     def is_critical(self) -> bool:
+        """Over 80°C er kritisk for en EV-ladestandere"""
         return self.celsius > 80.0
 
+    def is_sensor_fault(self) -> bool:
+        """Under -30°C indikerer sandsynligvis en defekt sensor"""
+        return self.celsius < -30.0
+
     def risk_level(self) -> str:
-        if self.celsius > 70:
+        if self.celsius > 70 or self.celsius < -30:
             return "HØJ"
         if self.celsius > 55:
             return "MEDIUM"
@@ -37,18 +43,30 @@ class Temperature:
 class Voltage:
     """
     Value Object: Spændingsmåling i volt.
-    Normal spænding er mellem 200-1000V (AC og DC ladere).
+    
+    Ingen hard validering — ekstreme værdier er symptomer på fejl.
+    Eksempler:
+    - Under 0V   → sensor fejl eller kortslutning
+    - Over 1000V → overspænding (CCS2 max er 1000V)
+    Begge skal generere incidents frem for at crashe systemet.
     """
     volts: float
 
-    def __post_init__(self):
-        if self.volts < 0 or self.volts > 1000:
-            raise ValueError(f"Ugyldig voltage: {self.volts}V — skal være mellem 0V og 1000V")
-
     def is_normal(self) -> bool:
+        """Normal AC spænding er minimum 200V"""
         return self.volts >= 200.0
 
+    def is_overvoltage(self) -> bool:
+        """Over 1000V indikerer farlig overspænding"""
+        return self.volts > 1000.0
+
+    def is_sensor_fault(self) -> bool:
+        """Negative værdier indikerer sensor fejl"""
+        return self.volts < 0.0
+
     def risk_level(self) -> str:
+        if self.volts < 0 or self.volts > 1000:
+            return "HØJ"
         if self.volts < 180:
             return "HØJ"
         if self.volts < 200:
@@ -60,16 +78,26 @@ class Voltage:
 class Current:
     """
     Value Object: Strømstyrke i ampere.
-    Max 500A dækker både AC og DC hurtigladere.
+    
+    Ingen hard validering — ekstreme værdier er symptomer på fejl.
+    Eksempler:
+    - Over 500A → kortslutning eller overbelastning
+    - Negativ   → sensor fejl
+    Begge skal generere incidents frem for at crashe systemet.
     """
     ampere: float
 
-    def __post_init__(self):
-        if self.ampere < 0 or self.ampere > 500:
-            raise ValueError(f"Ugyldig strømstyrke: {self.ampere}A — skal være mellem 0A og 500A")
-
     def is_flowing(self) -> bool:
+        """Strøm flyder hvis over 0.1A"""
         return self.ampere >= 0.1
+
+    def is_overcurrent(self) -> bool:
+        """Over 500A indikerer kortslutning"""
+        return self.ampere > 500.0
+
+    def is_sensor_fault(self) -> bool:
+        """Negative værdier indikerer sensor fejl"""
+        return self.ampere < 0.0
 
 
 # ==============================================================
@@ -109,6 +137,14 @@ class Charger:
 
     Ansvarlig for detektion af anomalier i telemetrimålinger.
     Al anomaly detection logik lever her — ikke i API-laget.
+
+    Detektionsrækkefølge:
+    1. Sensor fejl (ekstreme værdier udenfor fysisk mulige grænser)
+    2. Temperatur (kritisk sikkerhedsfejl)
+    3. Overspænding/overstrøm (kritisk sikkerhedsfejl)
+    4. Ingen strøm (driftsfejl)
+    5. Ledningsskade (driftsfejl)
+    6. OCPP fejlkode (connector fejl)
     """
     def __init__(self, id: str, location: str,
                  vendor: str, model: str,
@@ -126,17 +162,44 @@ class Charger:
         Kernedomænelogik: Analyserer telemetrimåling
         og returnerer (incident_type_str, severity_str) eller (None, None)
         """
+
+        # ---------- SENSOR FEJL ----------
+        # Ekstreme værdier udenfor fysisk mulige grænser
+        # indikerer defekt sensor der skal udskiftes
+        if reading.temperature.is_sensor_fault():
+            return "OVER_TEMPERATURE", "Critical"
+
+        if reading.voltage.is_sensor_fault():
+            return "NO_POWER", "High"
+
+        if reading.current_a.is_sensor_fault():
+            return "CABLE_DEFECT", "Medium"
+
+        # ---------- KRITISKE FEJL ----------
+        # Høj temperatur — risiko for brand
         if reading.temperature.is_critical():
             return "OVER_TEMPERATURE", "Critical"
 
+        # Overspænding — risiko for skade på hardware
+        if reading.voltage.is_overvoltage():
+            return "NO_POWER", "High"
+
+        # Overstrøm — risiko for kortslutning
+        if reading.current_a.is_overcurrent():
+            return "CABLE_DEFECT", "Critical"
+
+        # ---------- DRIFTSFEJL ----------
+        # Ingen strøm fra nettet
         if not reading.voltage.is_normal():
             if grid_status == "GRID_STRESS":
                 return "GRID_OUTAGE", "High"
             return "NO_POWER", "High"
 
+        # Ledningsskade — strøm flyder ikke trods normal spænding
         if not reading.current_a.is_flowing() and reading.voltage.is_normal():
             return "CABLE_DEFECT", "Medium"
 
+        # OCPP rapporteret connector fejl
         if reading.has_error():
             return "CONNECTOR_FAULT", "Medium"
 

@@ -38,9 +38,20 @@ class TestTemperature:
         temp = Temperature(30.0)
         assert temp.risk_level() == "LAV"
 
-    def test_invalid_temperature(self):
-        with pytest.raises(ValueError):
-            Temperature(500.0)
+    def test_extreme_temperature_is_critical(self):
+        # 500°C er ekstremt men kaster ikke fejl — det er et symptom
+        temp = Temperature(500.0)
+        assert temp.is_critical() == True
+
+    def test_sensor_fault_below_freezing(self):
+        # Under -30°C indikerer defekt sensor
+        temp = Temperature(-35.0)
+        assert temp.is_sensor_fault() == True
+        assert temp.risk_level() == "HØJ"
+
+    def test_no_sensor_fault_normal(self):
+        temp = Temperature(25.0)
+        assert temp.is_sensor_fault() == False
 
 
 class TestVoltage:
@@ -60,6 +71,22 @@ class TestVoltage:
         voltage = Voltage(170.0)
         assert voltage.risk_level() == "HØJ"
 
+    def test_overvoltage(self):
+        # Over 1000V er farlig overspænding
+        voltage = Voltage(1200.0)
+        assert voltage.is_overvoltage() == True
+
+    def test_sensor_fault_negative(self):
+        # Negativ voltage er sensor fejl
+        voltage = Voltage(-5.0)
+        assert voltage.is_sensor_fault() == True
+
+    def test_zero_voltage_not_sensor_fault(self):
+        # 0V er gyldig — betyder ingen strøm
+        voltage = Voltage(0.0)
+        assert voltage.is_sensor_fault() == False
+        assert voltage.is_normal() == False
+
 
 class TestCurrent:
     def test_current_flowing(self):
@@ -73,6 +100,21 @@ class TestCurrent:
     def test_boundary_current(self):
         current = Current(0.1)
         assert current.is_flowing() == True
+
+    def test_overcurrent(self):
+        # Over 500A er kortslutning
+        current = Current(600.0)
+        assert current.is_overcurrent() == True
+
+    def test_sensor_fault_negative(self):
+        # Negativ strøm er sensor fejl
+        current = Current(-1.0)
+        assert current.is_sensor_fault() == True
+
+    def test_normal_current_no_fault(self):
+        current = Current(20.0)
+        assert current.is_sensor_fault() == False
+        assert current.is_overcurrent() == False
 
 
 class TestSeverity:
@@ -199,6 +241,36 @@ class TestCharger:
         incident_type, severity = self.charger.detect_anomaly(reading, "GRID_STRESS")
         assert incident_type == "GRID_OUTAGE"
         assert severity == "High"
+
+    def test_detect_sensor_fault_temperature(self):
+        # Defekt temperatursensor — under -30°C
+        reading = TelemetryReading(
+            id="test-reading-006",
+            charger_id="test-charger-001",
+            power_kw=11.0,
+            voltage=230.0,
+            current_a=20.0,
+            temperature=-35.0,
+            recorded_at="2026-05-26 10:00:00"
+        )
+        incident_type, severity = self.charger.detect_anomaly(reading)
+        assert incident_type == "OVER_TEMPERATURE"
+        assert severity == "Critical"
+
+    def test_detect_overcurrent(self):
+        # Over 500A — kortslutning
+        reading = TelemetryReading(
+            id="test-reading-007",
+            charger_id="test-charger-001",
+            power_kw=0.0,
+            voltage=230.0,
+            current_a=600.0,
+            temperature=25.0,
+            recorded_at="2026-05-26 10:00:00"
+        )
+        incident_type, severity = self.charger.detect_anomaly(reading)
+        assert incident_type == "CABLE_DEFECT"
+        assert severity == "Critical"
 
     def test_is_available(self):
         assert self.charger.is_available() == True
