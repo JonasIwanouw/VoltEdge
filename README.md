@@ -18,7 +18,7 @@ Løsningen er bygget med Domain Driven Design (DDD) og opdelt i tre bounded cont
 | ML | scikit-learn (Random Forest) |
 | Ekstern integration | Energinet API (el-net status) |
 | API test | Postman |
-| Unit tests | pytest (44 tests) |
+| Unit tests | pytest (69 tests) |
 
 ---
 
@@ -46,8 +46,8 @@ VoltEdge/
   │     └── notification_repository.py  ← Repository pattern for Notification
   │
   ├── tests/
-  │     ├── test_domain.py               ← 44 unit tests for DDD klasser
-  │     └── test_api.py                  ← API integration tests
+  │     ├── test_domain.py               ← 54 unit tests for DDD klasser
+  │     └── test_api.py                  ← 15 API integration tests
   │
   ├── database/
   │     └── init.sql                     ← Database schema
@@ -82,6 +82,19 @@ VoltEdge/
 **Notification** — alt der handler om notifikationer:
 - `AlertNotification` (aggregate root) — leveringsstatus
 
+### Value Object metoder
+
+| Value Object | Metode | Beskrivelse |
+|---|---|---|
+| `Temperature` | `is_critical()` | Returnerer True hvis > 80°C |
+| `Temperature` | `is_sensor_fault()` | Returnerer True hvis < -30°C |
+| `Voltage` | `is_normal()` | Returnerer True hvis >= 200V |
+| `Voltage` | `is_overvoltage()` | Returnerer True hvis > 1000V |
+| `Voltage` | `is_sensor_fault()` | Returnerer True hvis < 0V |
+| `Current` | `is_flowing()` | Returnerer True hvis >= 0.1A |
+| `Current` | `is_overcurrent()` | Returnerer True hvis > 500A |
+| `Current` | `is_sensor_fault()` | Returnerer True hvis < 0A |
+
 ### Repository Pattern
 Al databaseadgang går via repositories — API-laget skriver aldrig SQL direkte:
 ```python
@@ -102,12 +115,22 @@ AnomalyDetected → IncidentCreated → AssignmentCreated
 
 ## Incident Detection
 
-| Fejltype | Betingelse | Severity |
-|---|---|---|
-| `OVER_TEMPERATURE` | Temperatur > 80°C | Critical |
-| `NO_POWER` | Voltage < 200V (og el-net OK) | High |
-| `CABLE_DEFECT` | Current < 0.1A trods normal voltage | Medium |
-| `GRID_OUTAGE` | Voltage < 200V + Energinet GRID_STRESS | High |
+Detektionsrækkefølge i `Charger.detect_anomaly()`:
+
+| Prioritet | Fejltype | Betingelse | Severity |
+|---|---|---|---|
+| 1 | Sensor fejl | Temperatur < -30°C | Critical |
+| 1 | Sensor fejl | Voltage < 0V | High |
+| 1 | Sensor fejl | Current < 0A | Medium |
+| 2 | `OVER_TEMPERATURE` | Temperatur > 80°C | Critical |
+| 2 | Overspænding | Voltage > 1000V | High |
+| 2 | Overstrøm | Current > 500A | Critical |
+| 3 | `GRID_OUTAGE` | Voltage < 200V + Energinet GRID_STRESS | High |
+| 3 | `NO_POWER` | Voltage < 200V (el-net OK) | High |
+| 3 | `CABLE_DEFECT` | Current < 0.1A trods normal voltage | Medium |
+| 4 | `CONNECTOR_FAULT` | OCPP fejlkode rapporteret | Medium |
+
+Sensor fejl detekteres ved fysisk umulige måleværdier og giver teknikeren en specifik anbefaling om sensorudskiftning via root cause analysen.
 
 ---
 
@@ -206,14 +229,14 @@ Tre requests simulerer det fulde flow:
 
 ## Unit Tests
 
-44 tests dækker alle DDD klasser:
+69 tests dækker alle DDD klasser:
 
 ```bash
-python3 -m pytest tests/test_domain.py -v
-# 44 passed in 1.74s
+python3 -m pytest tests/ -v
+# 69 passed in 3.98s
 ```
 
-Tests dækker value objects, aggregate roots og entiteter — herunder edge cases som at resolve et Open incident kaster en ValueError.
+Tests dækker value objects, aggregate roots og entiteter — herunder edge cases som sensor fejl ved negative værdier, overcurrent over 500A og at resolve et Open incident kaster en ValueError.
 
 ---
 
@@ -237,7 +260,7 @@ GitHub Actions kører automatisk ved push til `main`:
 1. Starter MySQL testdatabase
 2. Opretter tabeller via `init.sql`
 3. Installerer pakker
-4. Kører 44 unit tests
+4. Kører 69 unit tests
 5. Bygger Docker image (kun hvis tests passer)
 
 ---
